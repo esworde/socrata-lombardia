@@ -15,8 +15,8 @@ Regione Lombardia exposes its datasets through the Socrata platform. While queri
 
 ```bash
 # 1. Clone the repo
-git clone <repo-url>
-cd lombardia
+git clone https://github.com/esworde/socrata-lombardia.git
+cd socrata-lombardia
 
 # 2. Install dependencies
 pip install -r requirements.txt
