@@ -2,6 +2,8 @@ import importlib.util
 import json
 import sys
 import unittest
+import csv
+import tempfile
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -106,6 +108,83 @@ class ExporterPureTests(unittest.TestCase):
         self.assertEqual(tuple(normalized), export_payments.OUTPUT_FIELDS)
         self.assertEqual(normalized["pag_data"], "2026-07-01T09:00:00.000")
         self.assertNotIn("modello", normalized)
+
+
+class DailyFileTests(unittest.TestCase):
+    def test_writes_verified_historical_csv_atomically(self):
+        records = [
+            {"id": "1", "psp_desc": "Bank, S.p.A.", "pag_importo": "3.50", "ora": "8"},
+            {"id": "2", "pag_importo": "4.00", "ora": "9"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            result = export_payments.write_verified_day(
+                daily, date(2026, 7, 1), records, expected_count=2, today=date(2026, 8, 7)
+            )
+            final = daily / result.filename
+            self.assertEqual(result.status, "complete")
+            self.assertEqual(export_payments.csv_row_count(final), 2)
+            self.assertEqual(result.sha256, export_payments.sha256_file(final))
+            self.assertFalse(list(daily.glob("*.part")))
+            with final.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                self.assertEqual(tuple(reader.fieldnames), export_payments.OUTPUT_FIELDS)
+                self.assertEqual(next(reader)["psp_desc"], "Bank, S.p.A.")
+
+    def test_writes_header_only_zero_day(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = export_payments.write_verified_day(
+                Path(tmp), date(2026, 7, 2), [], expected_count=0, today=date(2026, 8, 7)
+            )
+            self.assertEqual(result.transactions, 0)
+            self.assertEqual(export_payments.csv_row_count(Path(tmp) / result.filename), 0)
+
+    def test_rejects_historical_count_mismatch_without_final_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            with self.assertRaises(export_payments.VerificationError):
+                export_payments.write_verified_day(
+                    daily, date(2026, 7, 1), [{"id": "1"}], 2, date(2026, 8, 7)
+                )
+            self.assertFalse((daily / "pagamenti_2026-07-01.csv").exists())
+
+    def test_marks_today_partial_without_requiring_equal_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = export_payments.write_verified_day(
+                Path(tmp), date(2026, 8, 7), [{"id": "1"}], 2, date(2026, 8, 7)
+            )
+            self.assertEqual(result.status, "partial")
+
+    def test_resume_requires_matching_count_and_checksum(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            result = export_payments.write_verified_day(
+                daily, date(2026, 7, 1), [{"id": "1"}], 1, date(2026, 8, 7)
+            )
+            entry = {"transactions": "1", "sha256": result.sha256}
+            self.assertTrue(export_payments.can_resume(daily / result.filename, entry))
+            self.assertFalse(export_payments.can_resume(daily / result.filename, {**entry, "sha256": "bad"}))
+
+    def test_resume_returns_false_when_csv_cannot_be_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.csv"
+            path.write_bytes(b"\xff")
+            self.assertFalse(export_payments.can_resume(path, {"transactions": "0", "sha256": "x"}))
+
+    def test_interrupted_promotion_removes_part_and_preserves_other_verified_day(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            preserved = export_payments.write_verified_day(
+                daily, date(2026, 6, 30), [{"id": "1"}], 1, date(2026, 8, 7)
+            )
+            with patch.object(export_payments.os, "replace", side_effect=OSError("interrupted")):
+                with self.assertRaises(OSError):
+                    export_payments.write_verified_day(
+                        daily, date(2026, 7, 1), [{"id": "2"}], 1, date(2026, 8, 7)
+                    )
+            self.assertTrue((daily / preserved.filename).exists())
+            self.assertFalse((daily / "pagamenti_2026-07-01.csv").exists())
+            self.assertFalse(list(daily.glob("*.part")))
 
 
 class SocrataClientTests(unittest.TestCase):

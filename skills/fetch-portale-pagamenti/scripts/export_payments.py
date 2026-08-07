@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import csv
+import hashlib
 import json
+import os
 import time
+from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any, Iterator, Mapping
+from pathlib import Path
+from typing import Any, Iterator, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -27,6 +32,16 @@ class InputError(ExportError):
 
 class VerificationError(ExportError):
     """Raised when source and exported data do not reconcile."""
+
+
+@dataclass(frozen=True)
+class DayResult:
+    day: date
+    status: str
+    transactions: int
+    filename: str
+    sha256: str
+    source_count_observed: int
 
 
 def resolve_dataset(value: str | None) -> str:
@@ -74,6 +89,74 @@ def normalize_record(record: Mapping[str, Any], day: date) -> dict[str, str]:
     normalized = {field: str(record.get(field, "")) for field in OUTPUT_FIELDS}
     normalized["pag_data"] = f"{day.isoformat()}T{hour:02d}:00:00.000"
     return normalized
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def csv_row_count(path: Path) -> int:
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.reader(handle)
+        try:
+            header = tuple(next(reader))
+        except StopIteration as error:
+            raise VerificationError(f"CSV file {path} has no header") from error
+        if header != OUTPUT_FIELDS:
+            raise VerificationError(f"CSV file {path} has an unexpected header")
+        return sum(1 for _ in reader)
+
+
+def write_verified_day(
+    daily_dir: Path,
+    day: date,
+    records: Sequence[Mapping[str, Any]],
+    expected_count: int,
+    today: date,
+) -> DayResult:
+    normalized = [normalize_record(record, day) for record in records]
+    ids = [record["id"] for record in normalized]
+    if not all(ids) or len(set(ids)) != len(ids):
+        raise VerificationError(f"Day {day.isoformat()} contains missing or duplicate transaction IDs")
+    if day != today and len(normalized) != expected_count:
+        raise VerificationError(
+            f"Day {day.isoformat()} returned {len(normalized)} records; expected {expected_count}"
+        )
+
+    daily_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"pagamenti_{day.isoformat()}.csv"
+    final_path = daily_dir / filename
+    part_path = daily_dir / f"{filename}.part"
+    status = "partial" if day == today and len(normalized) != expected_count else "complete"
+    try:
+        with part_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS)
+            writer.writeheader()
+            writer.writerows(normalized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if csv_row_count(part_path) != len(normalized):
+            raise VerificationError(f"CSV row count verification failed for {day.isoformat()}")
+        checksum = sha256_file(part_path)
+        os.replace(part_path, final_path)
+    except Exception:
+        part_path.unlink(missing_ok=True)
+        raise
+    return DayResult(day, status, len(normalized), filename, checksum, expected_count)
+
+
+def can_resume(path: Path, manifest_entry: Mapping[str, str]) -> bool:
+    try:
+        return (
+            csv_row_count(path) == int(manifest_entry["transactions"])
+            and sha256_file(path) == manifest_entry["sha256"]
+        )
+    except (KeyError, OSError, ValueError, VerificationError):
+        return False
 
 
 class SocrataClient:
