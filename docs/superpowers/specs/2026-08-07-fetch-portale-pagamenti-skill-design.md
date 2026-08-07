@@ -210,6 +210,23 @@ socrata-lombardia/
 
 Remove the repository’s old single-day exporter and dependency files after equivalent behavior is covered by the new exporter. Preserve the MIT license. Rewrite the top-level README around installation, agent examples, direct CLI use, output structure, optional authentication, and limitations.
 
+## README narrative
+
+The README must explain the project before presenting its commands. Use this order:
+
+1. **What this is:** describe a portable Agent Skill and deterministic CLI for verified Regione Lombardia Portale Pagamenti exports.
+2. **The problem:** explain that the records are public, but producing a trustworthy daily archive still requires discovering the correct historical dataset, resolving current-day aliases, constructing Socrata queries, paginating safely, retrying transient failures, and proving that every day is complete. Coding agents otherwise tend to rediscover or improvise this logic for each request.
+3. **What this solves:** state that a natural-language request or direct CLI invocation produces one CSV per requested day plus a manifest, metadata, and downloadable ZIP.
+4. **Installation:** cover Codex, Claude Code, Cursor, and direct Python use from the same canonical skill.
+5. **Examples:** show realistic agent prompts before the direct CLI command.
+6. **Trust guarantees:** explain historical row-count reconciliation, stable pagination, checksums, atomic completion, resumable files, header-only zero-row days, and explicit `partial` status for today.
+7. **Output and schema:** show the artifact tree and the fixed ten-field schema without duplicating the full schema reference.
+8. **Focused v1:** state clearly that this release intentionally supports Portale Pagamenti only and does not claim arbitrary Socrata or Regione Lombardia dataset support.
+9. **Future direction:** explain that the reusable foundations may later inform a broader skill for other Lombardia open-data datasets, guided by real use cases. Present this only as a direction, with no timeline, compatibility promise, or commitment to a particular v2 scope.
+10. **Development and license:** give the test command, Python requirement, zero-dependency statement, and MIT license.
+
+Use a concise, welcoming, problem-first tone. Do not lead with implementation history, Southwind-specific context, a generic platform vision, or a roadmap promise.
+
 ## Testing and acceptance criteria
 
 ### Automated tests
