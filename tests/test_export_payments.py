@@ -164,6 +164,7 @@ class DailyFileTests(unittest.TestCase):
             entry = {"transactions": "1", "sha256": result.sha256}
             self.assertTrue(export_payments.can_resume(daily / result.filename, entry))
             self.assertFalse(export_payments.can_resume(daily / result.filename, {**entry, "sha256": "bad"}))
+            self.assertFalse(export_payments.can_resume(daily / result.filename, {**entry, "transactions": None}))
 
     def test_resume_returns_false_when_csv_cannot_be_read(self):
         with tempfile.TemporaryDirectory() as tmp:

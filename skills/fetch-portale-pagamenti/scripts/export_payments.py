@@ -155,7 +155,7 @@ def can_resume(path: Path, manifest_entry: Mapping[str, str]) -> bool:
             csv_row_count(path) == int(manifest_entry["transactions"])
             and sha256_file(path) == manifest_entry["sha256"]
         )
-    except (KeyError, OSError, ValueError, VerificationError):
+    except (KeyError, OSError, TypeError, ValueError, VerificationError):
         return False
 
 
