@@ -34,7 +34,7 @@ def resolve_dataset(value: str | None) -> str:
         "dati.lombardia.it", "www.dati.lombardia.it"
     }:
         raise InputError(f"Unsupported Portale Pagamenti dataset: {value}")
-    matches = [dataset_id for dataset_id in SUPPORTED_DATASET_IDS if dataset_id in parsed.path]
+    matches = [segment for segment in parsed.path.split("/") if segment in SUPPORTED_DATASET_IDS]
     if len(matches) != 1:
         raise InputError(f"Unsupported Portale Pagamenti dataset: {value}")
     return CANONICAL_DATASET_ID

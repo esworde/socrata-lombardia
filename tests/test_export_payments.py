@@ -29,6 +29,12 @@ class ExporterPureTests(unittest.TestCase):
         with self.assertRaises(export_payments.InputError):
             export_payments.resolve_dataset("https://example.com/dr3m-v3by")
 
+    def test_rejects_dataset_ids_embedded_in_url_path_segments(self):
+        with self.assertRaises(export_payments.InputError):
+            export_payments.resolve_dataset(
+                "https://www.dati.lombardia.it/Government/example-dr3m-v3by/about_data"
+            )
+
     def test_validates_inclusive_period(self):
         start = export_payments.parse_iso_date("2026-07-30")
         end = export_payments.parse_iso_date("2026-07-31")
