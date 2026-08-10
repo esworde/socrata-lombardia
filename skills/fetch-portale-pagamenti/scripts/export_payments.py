@@ -222,6 +222,7 @@ class SocrataClient:
                 with urlopen(request, timeout=60, context=context) as response:
                     return json.loads(response.read().decode("utf-8"))
             except HTTPError as error:
+                error.close()
                 if error.code != 429 and error.code < 500:
                     raise ExportError(f"Socrata rejected the request with HTTP {error.code}") from error
                 last_error = error

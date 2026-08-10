@@ -7,6 +7,7 @@ import tempfile
 import zipfile
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 from threading import Thread
 from types import SimpleNamespace
@@ -251,6 +252,21 @@ class SocrataClientTests(unittest.TestCase):
             with self.assertRaises(export_payments.ExportError):
                 client._request({"$limit": "1"})
         self.assertEqual(urlopen.call_count, 1)
+
+    def test_request_closes_caught_http_error_responses(self):
+        retryable_body = BytesIO(b"retryable")
+        retryable = HTTPError("https://example", 429, "busy", {}, retryable_body)
+        client = export_payments.SocrataClient(attempts=2, backoff=0)
+        with patch.object(export_payments, "urlopen", side_effect=[retryable, FakeResponse([])]):
+            self.assertEqual(client._request({"$limit": "1"}), [])
+        self.assertTrue(retryable_body.closed)
+
+        permanent_body = BytesIO(b"permanent")
+        permanent = HTTPError("https://example", 400, "bad", {}, permanent_body)
+        with patch.object(export_payments, "urlopen", side_effect=permanent):
+            with self.assertRaises(export_payments.ExportError):
+                client._request({"$limit": "1"})
+        self.assertTrue(permanent_body.closed)
 
     def test_request_retries_429_and_500_against_local_http_server(self):
         Handler.responses = [(429, b"[]"), (500, b"[]"), (200, b"[]")]
