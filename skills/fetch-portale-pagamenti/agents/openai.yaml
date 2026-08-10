@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fetch Portale Pagamenti"
+  short_description: "Download verified Lombardia PagoPA daily CSVs"
+  default_prompt: "Use $fetch-portale-pagamenti to download Portale Pagamenti transactions for a date range."

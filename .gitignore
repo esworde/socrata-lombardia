@@ -2,3 +2,7 @@
 *.csv
 __pycache__/
 *.pyc
+exports/
+*.part
+*.zip
+.DS_Store

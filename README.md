@@ -1,76 +1,93 @@
-# Lombardia Open Data Exporter
+# Fetch Portale Pagamenti
 
-Quick extraction of datasets from [Regione Lombardia Open Data](https://www.dati.lombardia.it/) via the Socrata SODA API.
+## What this is
 
-Built for a [Southwind AI, Inc.](https://southwind.ai) use case around public payment transaction analysis.
+A portable Agent Skill and deterministic CLI for verified Regione Lombardia
+Portale Pagamenti exports.
 
-## Prerequisites
+## The problem
 
-- Python 3.8+
-- A Socrata App Token (recommended for higher rate limits)
+Public records still require discovering the historical source, resolving
+current-day aliases, building Socrata queries, paginating safely, retrying
+transient failures, and proving daily completeness. Coding agents otherwise
+improvise this work repeatedly.
 
-Regione Lombardia exposes its datasets through the Socrata platform. While queries work without authentication, an **App Token** raises the rate limit from 1,000 to 50,000 requests/hour. You can register for a free token at [https://www.dati.lombardia.it/profile/edit/developer_settings](https://www.dati.lombardia.it/profile/edit/developer_settings).
+## What this solves
 
-## Quickstart
+Natural-language or CLI requests produce one CSV per day, `manifest.csv`,
+`metadata.json`, and one ZIP delivery artifact.
 
-```bash
-# 1. Clone the repo
-git clone https://github.com/esworde/socrata-lombardia.git
-cd socrata-lombardia
+## Installation
 
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Create your config from the example
-cp .env.example .env
-
-# 4. Edit .env with your settings (see Configuration below)
-#    At minimum, set the DATE you want to export.
-#    APP_TOKEN is optional but recommended.
-
-# 5. Run
-python query.py
-```
-
-The date can also be passed as a CLI argument, which takes priority over `.env`:
+The canonical skill is `skills/fetch-portale-pagamenti`. Install that same copy
+for a supported coding agent:
 
 ```bash
-python query.py 2026-02-09
+python3 install.py --agent codex
+python3 install.py --agent claude
+python3 install.py --agent cursor
+
+# Direct Python use from the canonical skill
+python3 skills/fetch-portale-pagamenti/scripts/export_payments.py \
+  --from 2026-06-03 --to 2026-06-05 --output exports
 ```
 
-Output is a CSV file in the current directory. The filename is configurable via `OUTPUT_FILE` in `.env` (use `{date}` as a placeholder for the date).
+The exporter uses `SOCRATA_APP_TOKEN` only when that optional environment
+variable is already set; no token is required for ordinary exports.
 
-## Example dataset
+## Examples
 
-The default configuration targets the **Portale Pagamenti** dataset (`78vt-im2v`):
+Ask an agent: “Download Portale Pagamenti transactions for 3–5 June 2026.”
 
-> Pagamenti effettuati tramite il portale pagamentinlombardia.servizirl.it per il sistema pagoPA nella data odierna.
+Ask an agent: “Use `$fetch-portale-pagamenti` to export yesterday’s Lombardia
+pagoPA transactions.”
 
-Dataset URL: https://www.dati.lombardia.it/resource/78vt-im2v.json
+Or run the CLI directly:
 
-You can point `ENDPOINT` to any other Socrata dataset on dati.lombardia.it.
+```bash
+python3 skills/fetch-portale-pagamenti/scripts/export_payments.py \
+  --from 2026-06-03 --to 2026-06-05 --output exports
+```
 
-## Configuration
+## Trust guarantees
 
-All options are set via `.env` (see `.env.example`):
+Historical days are reconciled against the source. The exporter uses stable
+pagination, retries transient failures, records checksums, completes files
+atomically, resumes verified work, writes header-only CSVs for zero-row days,
+and marks the current day `partial`.
 
-| Variable | Description | Default |
-|---|---|---|
-| `APP_TOKEN` | Socrata API token | _(empty, unauthenticated)_ |
-| `ENDPOINT` | SODA API resource URL | Portale Pagamenti dataset |
-| `DATE` | Target date (`YYYY-MM-DD`) | _(none, required)_ |
-| `OUTPUT_FILE` | Output filename, `{date}` is replaced with the date | `pagamenti_{date}.csv` |
-| `DROP_COLUMNS` | Comma-separated columns to remove | `ora,giorno_della_settimana,modello,ultima_modifica_data` |
-| `RENAME_COLUMNS` | Comma-separated `old:new` pairs | _(empty)_ |
+## Output and schema
 
-## How it works
+```text
+exports/
+├── portale-pagamenti-2026-06-03-to-2026-06-05/
+│   ├── daily/pagamenti_2026-06-03.csv
+│   ├── manifest.csv
+│   └── metadata.json
+└── portale-pagamenti-2026-06-03-to-2026-06-05.zip
+```
 
-1. Queries the Socrata SODA API filtering by `pag_data` for the given date
-2. Paginates through results in batches of 1,000
-3. Enriches `pag_data` with the hour from the `ora` field
-4. Drops and renames columns per configuration
-5. Writes the result to a CSV file
+Each CSV has the fixed fields `id`, `psp_id`, `psp_desc`, `ente_cf`,
+`ente_desc`, `ente_cap`, `ente_prov`, `pag_importo`, `pag_data`, and
+`tipo_dovuto`. See [the schema reference](skills/fetch-portale-pagamenti/references/schema.md)
+for provenance and delivery details.
 
-## License
+## Focused v1
 
-MIT
+This skill supports Portale Pagamenti only. It does not claim support for
+arbitrary Socrata or Regione Lombardia datasets.
+
+## Future direction
+
+These foundations may later inform a broader skill for other Lombardia
+open-data datasets, guided by real use cases.
+
+## Development and license
+
+Requires Python 3.10+ and has zero dependencies. Run the tests with:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Released under the [MIT License](LICENSE).
