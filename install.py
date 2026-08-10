@@ -45,9 +45,6 @@ def install_skill(agent: str, home: Path, source: Path = DEFAULT_SOURCE) -> tupl
                 target.rename(backup)
                 moved_target = True
             temporary.rename(target)
-            if moved_target:
-                _remove_path(backup)
-                moved_target = False
         except Exception:
             try:
                 _remove_path(temporary)
@@ -59,6 +56,8 @@ def install_skill(agent: str, home: Path, source: Path = DEFAULT_SOURCE) -> tupl
                 elif not had_target:
                     _remove_path(target)
             raise
+        if moved_target:
+            _remove_path(backup)
         installed.append(target)
     return tuple(installed)
 

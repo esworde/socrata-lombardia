@@ -116,6 +116,27 @@ class InstallerTests(unittest.TestCase):
 
         self.assert_prior_install_preserved(target, unrelated)
 
+    def test_partial_backup_cleanup_failure_keeps_committed_new_install(self):
+        target, unrelated = self.prepare_existing_codex_install()
+        original_rmtree = skill_installer.shutil.rmtree
+
+        def partially_delete_backup_then_fail(path):
+            path = Path(path)
+            if path.name.startswith(".fetch-portale-pagamenti.backup-"):
+                (path / "old.txt").unlink()
+                raise OSError("backup cleanup failed")
+            return original_rmtree(path)
+
+        with patch.object(
+            skill_installer.shutil, "rmtree", side_effect=partially_delete_backup_then_fail
+        ):
+            with self.assertRaisesRegex(OSError, "backup cleanup failed"):
+                skill_installer.install_skill("codex", self.home, self.source)
+
+        self.assertTrue((target / "scripts/export.py").is_file())
+        self.assertFalse((target / "old.txt").exists())
+        self.assertEqual(unrelated.read_text(), "keep")
+
     def test_replaces_file_and_symlink_targets(self):
         for kind in ("file", "symlink"):
             with self.subTest(kind=kind):
