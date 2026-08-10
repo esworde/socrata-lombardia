@@ -9,6 +9,7 @@ from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 
@@ -190,6 +191,31 @@ class DailyFileTests(unittest.TestCase):
 
 
 class SocrataClientTests(unittest.TestCase):
+    def test_ssl_context_uses_system_bundle_only_without_default_cafile(self):
+        with (
+            patch.object(
+                export_payments.ssl,
+                "get_default_verify_paths",
+                return_value=SimpleNamespace(cafile="/python/default.pem"),
+            ),
+            patch.object(export_payments.ssl, "create_default_context", return_value="default") as create,
+        ):
+            self.assertEqual(export_payments.create_ssl_context(), "default")
+        create.assert_called_once_with()
+
+        fallback = export_payments.SYSTEM_CA_BUNDLES[1]
+        with (
+            patch.object(
+                export_payments.ssl,
+                "get_default_verify_paths",
+                return_value=SimpleNamespace(cafile=None),
+            ),
+            patch.object(export_payments.os.path, "isfile", side_effect=lambda path: path == fallback),
+            patch.object(export_payments.ssl, "create_default_context", return_value="fallback") as create,
+        ):
+            self.assertEqual(export_payments.create_ssl_context(), "fallback")
+        create.assert_called_once_with(cafile=fallback)
+
     def test_expected_counts_fills_zero_days(self):
         client = export_payments.SocrataClient()
         response = [{"day": "2026-07-01T00:00:00.000", "count": "2"}]

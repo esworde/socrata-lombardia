@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import os
+import ssl
 import time
 import zipfile
 from dataclasses import dataclass
@@ -24,6 +25,10 @@ OUTPUT_FIELDS = (
     "ente_cap", "ente_prov", "pag_importo", "pag_data", "tipo_dovuto",
 )
 DEFAULT_ENDPOINT = "https://www.dati.lombardia.it/resource/78vt-im2v.json"
+SYSTEM_CA_BUNDLES = (
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/certs/ca-certificates.crt",
+)
 
 
 class ExportError(Exception):
@@ -36,6 +41,15 @@ class InputError(ExportError):
 
 class VerificationError(ExportError):
     """Raised when source and exported data do not reconcile."""
+
+
+def create_ssl_context() -> ssl.SSLContext:
+    if ssl.get_default_verify_paths().cafile:
+        return ssl.create_default_context()
+    for cafile in SYSTEM_CA_BUNDLES:
+        if os.path.isfile(cafile):
+            return ssl.create_default_context(cafile=cafile)
+    return ssl.create_default_context()
 
 
 @dataclass(frozen=True)
@@ -201,10 +215,11 @@ class SocrataClient:
         if self.token:
             headers["X-App-Token"] = self.token
         request = Request(f"{self.endpoint}?{query}", headers=headers)
+        context = create_ssl_context()
         last_error: HTTPError | URLError | None = None
         for attempt in range(1, self.attempts + 1):
             try:
-                with urlopen(request, timeout=60) as response:
+                with urlopen(request, timeout=60, context=context) as response:
                     return json.loads(response.read().decode("utf-8"))
             except HTTPError as error:
                 if error.code != 429 and error.code < 500:
