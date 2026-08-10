@@ -1,20 +1,24 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import hashlib
 import json
 import os
 import time
+import zipfile
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 CANONICAL_DATASET_ID = "78vt-im2v"
 SUPPORTED_DATASET_IDS = {"78vt-im2v", "dr3m-v3by", "ne5i-i4a8"}
+EXPORTER_VERSION = "1.0.0"
 OUTPUT_FIELDS = (
     "id", "psp_id", "psp_desc", "ente_cf", "ente_desc",
     "ente_cap", "ente_prov", "pag_importo", "pag_data", "tipo_dovuto",
@@ -42,6 +46,23 @@ class DayResult:
     filename: str
     sha256: str
     source_count_observed: int
+
+
+@dataclass(frozen=True)
+class ExportConfig:
+    start: date
+    end: date
+    output: Path
+    requested_dataset: str | None
+    today: date
+
+
+@dataclass(frozen=True)
+class ExportSummary:
+    root: Path
+    zip_path: Path
+    days: tuple[DayResult, ...]
+    transactions: int
 
 
 def resolve_dataset(value: str | None) -> str:
@@ -242,3 +263,195 @@ class SocrataClient:
             if len(rows) < self.page_size:
                 break
         return [records[row_id] for row_id in sorted(records)]
+
+
+def _load_manifest(path: Path) -> dict[date, dict[str, str]]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open(newline="", encoding="utf-8") as handle:
+            entries = {}
+            for entry in csv.DictReader(handle):
+                entries[date.fromisoformat(entry["date"])] = entry
+            return entries
+    except (KeyError, OSError, UnicodeError, ValueError, csv.Error):
+        return {}
+
+
+def _write_manifest(path: Path, results: Sequence[DayResult]) -> None:
+    part_path = path.with_name(f"{path.name}.part")
+    try:
+        with part_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(
+                handle, fieldnames=("date", "status", "transactions", "filename", "sha256")
+            )
+            writer.writeheader()
+            for result in results:
+                writer.writerow({
+                    "date": result.day.isoformat(),
+                    "status": result.status,
+                    "transactions": result.transactions,
+                    "filename": result.filename,
+                    "sha256": result.sha256,
+                })
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(part_path, path)
+    except Exception:
+        part_path.unlink(missing_ok=True)
+        raise
+
+
+def _write_metadata(path: Path, config: ExportConfig, results: Sequence[DayResult]) -> None:
+    current_result = next((result for result in results if result.day == config.today), None)
+    metadata = {
+        "exporter_version": EXPORTER_VERSION,
+        "dataset": {
+            "requested": config.requested_dataset,
+            "canonical_id": CANONICAL_DATASET_ID,
+            "url": DEFAULT_ENDPOINT,
+        },
+        "period": {"from": config.start.isoformat(), "to": config.end.isoformat()},
+        "timezone": "Europe/Rome",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "schema": list(OUTPUT_FIELDS),
+        "files": len(results),
+        "transactions": sum(result.transactions for result in results),
+        "contains_partial_day": any(result.status == "partial" for result in results),
+        "current_day_source_count_observed_at_end": (
+            current_result.source_count_observed if current_result else None
+        ),
+    }
+    part_path = path.with_name(f"{path.name}.part")
+    try:
+        with part_path.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(part_path, path)
+    except Exception:
+        part_path.unlink(missing_ok=True)
+        raise
+
+
+def _write_zip(root: Path, zip_path: Path, results: Sequence[DayResult]) -> None:
+    part_path = Path(f"{zip_path}.part")
+    try:
+        with zipfile.ZipFile(part_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for result in results:
+                archive.write(root / "daily" / result.filename, f"daily/{result.filename}")
+            archive.write(root / "manifest.csv", "manifest.csv")
+            archive.write(root / "metadata.json", "metadata.json")
+        os.replace(part_path, zip_path)
+    except Exception:
+        part_path.unlink(missing_ok=True)
+        raise
+
+
+def _resumed_result(day: date, entry: Mapping[str, str], source_count: int) -> DayResult:
+    return DayResult(
+        day=day,
+        status="complete",
+        transactions=int(entry["transactions"]),
+        filename=entry["filename"],
+        sha256=entry["sha256"],
+        source_count_observed=source_count,
+    )
+
+
+def export_range(config: ExportConfig, client: SocrataClient) -> ExportSummary:
+    validate_period(config.start, config.end, config.today)
+    resolve_dataset(config.requested_dataset)
+    root = config.output / f"portale-pagamenti-{config.start}-to-{config.end}"
+    daily_dir = root / "daily"
+    daily_dir.mkdir(parents=True, exist_ok=True)
+    manifest_entries = _load_manifest(root / "manifest.csv")
+    expected_counts = client.expected_counts(config.start, config.end)
+    results: list[DayResult] = []
+
+    for day in iter_dates(config.start, config.end):
+        expected_count = expected_counts[day]
+        filename = f"pagamenti_{day.isoformat()}.csv"
+        entry = manifest_entries.get(day)
+        path = daily_dir / filename
+        resumed = (
+            day != config.today
+            and entry is not None
+            and entry.get("status") == "complete"
+            and entry.get("filename") == filename
+            and entry.get("transactions") == str(expected_count)
+            and can_resume(path, entry)
+        )
+        if resumed:
+            result = _resumed_result(day, entry, expected_count)
+            progress = "resumed"
+        else:
+            records = client.fetch_day(day)
+            retried = day != config.today and len(records) != expected_count
+            if retried:
+                records = client.fetch_day(day)
+            result = write_verified_day(daily_dir, day, records, expected_count, config.today)
+            progress = "retried" if retried else "downloaded"
+
+        if day == config.today:
+            source_count = client.count_day(day)
+            status = "partial" if result.status == "partial" or source_count != result.transactions else "complete"
+            result = DayResult(
+                result.day, status, result.transactions, result.filename, result.sha256, source_count
+            )
+            if status == "partial":
+                progress = "partial"
+        else:
+            source_count = client.count_day(day)
+            if source_count != result.transactions:
+                records = client.fetch_day(day)
+                source_count = client.count_day(day)
+                if len(records) != source_count:
+                    raise VerificationError(
+                        f"Day {day.isoformat()} changed during final reconciliation"
+                    )
+                result = write_verified_day(daily_dir, day, records, source_count, config.today)
+                progress = "retried"
+        print(f"{day.isoformat()}: {progress}")
+        results.append(result)
+
+    manifest_path = root / "manifest.csv"
+    metadata_path = root / "metadata.json"
+    _write_manifest(manifest_path, results)
+    _write_metadata(metadata_path, config, results)
+    zip_path = config.output / f"{root.name}.zip"
+    _write_zip(root, zip_path, results)
+    return ExportSummary(root, zip_path, tuple(results), sum(result.transactions for result in results))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Export verified Portale Pagamenti daily CSV files.")
+    parser.add_argument("--from", dest="start", required=True)
+    parser.add_argument("--to", dest="end", required=True)
+    parser.add_argument("--output", type=Path, default=Path("exports"))
+    parser.add_argument("--dataset")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        config = ExportConfig(
+            parse_iso_date(args.start),
+            parse_iso_date(args.end),
+            args.output,
+            args.dataset,
+            datetime.now(ZoneInfo("Europe/Rome")).date(),
+        )
+        summary = export_range(config, SocrataClient(token=os.environ.get("SOCRATA_APP_TOKEN", "")))
+    except ExportError as error:
+        print(f"Error: {error}", file=os.sys.stderr)
+        return 1
+    print(f"ZIP: {summary.zip_path}")
+    print(f"Transactions: {summary.transactions}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -4,11 +4,12 @@ import sys
 import unittest
 import csv
 import tempfile
+import zipfile
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 
 SCRIPT = Path(__file__).parents[1] / "skills/fetch-portale-pagamenti/scripts/export_payments.py"
@@ -246,3 +247,129 @@ class SocrataClientTests(unittest.TestCase):
             with self.assertRaisesRegex(export_payments.ExportError, "after 2 attempts"):
                 client._request({"$limit": "1"})
         self.assertEqual(urlopen.call_count, 2)
+
+
+class RangeExportTests(unittest.TestCase):
+    def test_export_range_creates_manifest_metadata_and_zip(self):
+        client = Mock()
+        client.expected_counts.return_value = {
+            date(2026, 7, 1): 1,
+            date(2026, 7, 2): 0,
+        }
+        client.fetch_day.side_effect = [[{"id": "1", "ora": "8"}], []]
+        client.count_day.side_effect = [1, 0]
+        with tempfile.TemporaryDirectory() as tmp:
+            config = export_payments.ExportConfig(
+                start=date(2026, 7, 1),
+                end=date(2026, 7, 2),
+                output=Path(tmp),
+                requested_dataset="dr3m-v3by",
+                today=date(2026, 8, 7),
+            )
+            summary = export_payments.export_range(config, client)
+            self.assertEqual(summary.transactions, 1)
+            self.assertTrue(summary.zip_path.exists())
+            with (summary.root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual([row["date"] for row in rows], ["2026-07-01", "2026-07-02"])
+            self.assertEqual([row["transactions"] for row in rows], ["1", "0"])
+            metadata = json.loads((summary.root / "metadata.json").read_text())
+            self.assertEqual(metadata["dataset"]["canonical_id"], "78vt-im2v")
+            self.assertFalse(metadata["contains_partial_day"])
+            with zipfile.ZipFile(summary.zip_path) as archive:
+                self.assertEqual(
+                    sorted(archive.namelist()),
+                    [
+                        "daily/pagamenti_2026-07-01.csv",
+                        "daily/pagamenti_2026-07-02.csv",
+                        "manifest.csv",
+                        "metadata.json",
+                    ],
+                )
+
+    def test_second_run_resumes_verified_historical_files(self):
+        client = Mock()
+        client.expected_counts.return_value = {date(2026, 7, 1): 1}
+        client.fetch_day.return_value = [{"id": "1", "ora": "8"}]
+        client.count_day.return_value = 1
+        with tempfile.TemporaryDirectory() as tmp:
+            config = export_payments.ExportConfig(
+                date(2026, 7, 1), date(2026, 7, 1), Path(tmp), None, date(2026, 8, 7)
+            )
+            export_payments.export_range(config, client)
+            export_payments.export_range(config, client)
+        self.assertEqual(client.fetch_day.call_count, 1)
+
+    def test_final_historical_reconciliation_failure_creates_no_zip(self):
+        client = Mock()
+        client.expected_counts.return_value = {date(2026, 7, 1): 1}
+        client.fetch_day.return_value = [{"id": "1", "ora": "8"}]
+        client.count_day.return_value = 2
+        with tempfile.TemporaryDirectory() as tmp:
+            config = export_payments.ExportConfig(
+                date(2026, 7, 1), date(2026, 7, 1), Path(tmp), None, date(2026, 8, 7)
+            )
+            with self.assertRaises(export_payments.VerificationError):
+                export_payments.export_range(config, client)
+            self.assertFalse(list(Path(tmp).glob("*.zip")))
+            self.assertTrue(
+                (Path(tmp) / "portale-pagamenti-2026-07-01-to-2026-07-01"
+                 / "daily/pagamenti_2026-07-01.csv").exists()
+            )
+
+    def test_final_count_mismatch_refetches_once_then_succeeds(self):
+        client = Mock()
+        client.expected_counts.return_value = {date(2026, 7, 1): 1}
+        client.fetch_day.side_effect = [
+            [{"id": "1", "ora": "8"}],
+            [{"id": "1", "ora": "8"}],
+        ]
+        client.count_day.side_effect = [2, 1]
+        with tempfile.TemporaryDirectory() as tmp:
+            config = export_payments.ExportConfig(
+                date(2026, 7, 1), date(2026, 7, 1), Path(tmp), None, date(2026, 8, 7)
+            )
+            summary = export_payments.export_range(config, client)
+            self.assertTrue(summary.zip_path.exists())
+        self.assertEqual(client.fetch_day.call_count, 2)
+
+    def test_current_day_is_partial_and_records_final_source_count(self):
+        client = Mock()
+        client.expected_counts.return_value = {date(2026, 8, 7): 1}
+        client.fetch_day.return_value = [{"id": "1", "ora": "8"}]
+        client.count_day.return_value = 2
+        with tempfile.TemporaryDirectory() as tmp:
+            config = export_payments.ExportConfig(
+                date(2026, 8, 7), date(2026, 8, 7), Path(tmp), None, date(2026, 8, 7)
+            )
+            summary = export_payments.export_range(config, client)
+            metadata = json.loads((summary.root / "metadata.json").read_text())
+            with (summary.root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+                manifest = next(csv.DictReader(handle))
+            self.assertEqual(manifest["status"], "partial")
+            self.assertTrue(metadata["contains_partial_day"])
+            self.assertEqual(metadata["current_day_source_count_observed_at_end"], 2)
+
+    def test_current_day_records_final_count_when_initial_count_was_stale(self):
+        client = Mock()
+        client.expected_counts.return_value = {date(2026, 8, 7): 2}
+        client.fetch_day.return_value = [{"id": "1", "ora": "8"}]
+        client.count_day.return_value = 1
+        with tempfile.TemporaryDirectory() as tmp:
+            config = export_payments.ExportConfig(
+                date(2026, 8, 7), date(2026, 8, 7), Path(tmp), None, date(2026, 8, 7)
+            )
+            summary = export_payments.export_range(config, client)
+        self.assertEqual(summary.days[0].status, "partial")
+        self.assertEqual(summary.days[0].source_count_observed, 1)
+
+    def test_cli_reads_token_only_from_environment(self):
+        parser = export_payments.build_parser()
+        destinations = {action.dest for action in parser._actions}
+        self.assertNotIn("token", destinations)
+        with patch.dict("os.environ", {"SOCRATA_APP_TOKEN": "secret"}), patch.object(
+            export_payments, "export_range"
+        ) as run:
+            run.return_value = export_payments.ExportSummary(Path("x"), Path("x.zip"), (), 0)
+            code = export_payments.main(["--from", "2026-07-01", "--to", "2026-07-01"])
+        self.assertEqual(code, 0)
