@@ -396,12 +396,10 @@ def export_range(config: ExportConfig, client: SocrataClient) -> ExportSummary:
 
         if day == config.today:
             source_count = client.count_day(day)
-            status = "partial" if result.status == "partial" or source_count != result.transactions else "complete"
             result = DayResult(
-                result.day, status, result.transactions, result.filename, result.sha256, source_count
+                result.day, "partial", result.transactions, result.filename, result.sha256, source_count
             )
-            if status == "partial":
-                progress = "partial"
+            progress = "partial"
         else:
             source_count = client.count_day(day)
             if source_count != result.transactions:

@@ -363,6 +363,23 @@ class RangeExportTests(unittest.TestCase):
         self.assertEqual(summary.days[0].status, "partial")
         self.assertEqual(summary.days[0].source_count_observed, 1)
 
+    def test_current_day_is_partial_when_all_counts_match(self):
+        client = Mock()
+        client.expected_counts.return_value = {date(2026, 8, 7): 1}
+        client.fetch_day.return_value = [{"id": "1", "ora": "8"}]
+        client.count_day.return_value = 1
+        with tempfile.TemporaryDirectory() as tmp:
+            config = export_payments.ExportConfig(
+                date(2026, 8, 7), date(2026, 8, 7), Path(tmp), None, date(2026, 8, 7)
+            )
+            summary = export_payments.export_range(config, client)
+            metadata = json.loads((summary.root / "metadata.json").read_text())
+            with (summary.root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+                manifest = next(csv.DictReader(handle))
+        self.assertEqual(summary.days[0].status, "partial")
+        self.assertEqual(manifest["status"], "partial")
+        self.assertEqual(metadata["current_day_source_count_observed_at_end"], 1)
+
     def test_cli_reads_token_only_from_environment(self):
         parser = export_payments.build_parser()
         destinations = {action.dest for action in parser._actions}
