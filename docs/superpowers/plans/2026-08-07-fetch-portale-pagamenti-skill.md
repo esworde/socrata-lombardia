@@ -923,9 +923,22 @@ python3 /Users/esp/.codex/skills/.system/skill-creator/scripts/generate_openai_y
   --interface 'default_prompt=Use $fetch-portale-pagamenti to download Portale Pagamenti transactions for a date range.'
 ```
 
-- [ ] **Step 4: Rewrite human documentation and license**
+- [ ] **Step 4: Rewrite the README as a problem-first project story and add the license**
 
-Rewrite `README.md` with these sections in order: purpose, supported agents, installation commands, example prompts, direct CLI use, output structure, fixed schema, optional `SOCRATA_APP_TOKEN`, reliability guarantees, supported identifiers, v1 limitations, development tests, and MIT license. State Python 3.10+ and zero dependencies. Do not mention Southwind or generic Socrata support.
+Rewrite `README.md` with these sections in order:
+
+1. **What this is:** a portable Agent Skill and deterministic CLI for verified Regione Lombardia Portale Pagamenti exports.
+2. **The problem:** public records still require discovering the historical source, resolving current-day aliases, building Socrata queries, paginating safely, retrying transient failures, and proving daily completeness; coding agents otherwise improvise this work repeatedly.
+3. **What this solves:** natural-language or CLI requests produce one CSV per day, `manifest.csv`, `metadata.json`, and one ZIP delivery artifact.
+4. **Installation:** commands for Codex, Claude Code, Cursor, and direct Python use from the one canonical skill.
+5. **Examples:** realistic agent prompts first, followed by the direct CLI command.
+6. **Trust guarantees:** historical reconciliation, stable pagination, checksums, atomic completion, resume, header-only zero days, and current-day `partial` status.
+7. **Output and schema:** the artifact tree and fixed ten-field schema, without duplicating the full reference prose.
+8. **Focused v1:** Portale Pagamenti only; no arbitrary Socrata or Regione Lombardia dataset claim.
+9. **Future direction:** the foundations may later inform a broader skill for other Lombardia open-data datasets, guided by real use cases, with no timeline, compatibility promise, or committed v2 scope.
+10. **Development and license:** tests, Python 3.10+, zero dependencies, and MIT.
+
+Use a concise, welcoming tone. Include the optional `SOCRATA_APP_TOKEN` where authentication is explained. Do not mention Southwind, lead with implementation history, or present the future direction as a roadmap promise.
 
 Create `LICENSE` with the standard MIT license and copyright line `Copyright (c) 2026 esworde`.
 
