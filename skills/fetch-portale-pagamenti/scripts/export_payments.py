@@ -97,9 +97,12 @@ def resolve_dataset(value: str | None) -> str:
 
 def parse_iso_date(value: str) -> date:
     try:
-        return date.fromisoformat(value)
+        parsed = date.fromisoformat(value)
     except ValueError as error:
         raise InputError(f"Invalid date '{value}'; use YYYY-MM-DD") from error
+    if parsed.isoformat() != value:
+        raise InputError(f"Invalid date '{value}'; use YYYY-MM-DD")
+    return parsed
 
 
 def validate_period(start: date, end: date, today: date) -> None:
@@ -223,7 +226,7 @@ class SocrataClient:
                     return json.loads(response.read().decode("utf-8"))
             except HTTPError as error:
                 error.close()
-                if error.code != 429 and error.code < 500:
+                if error.code != 429 and not 500 <= error.code <= 599:
                     raise ExportError(f"Socrata rejected the request with HTTP {error.code}") from error
                 last_error = error
             except URLError as error:
@@ -234,14 +237,21 @@ class SocrataClient:
 
     def expected_counts(self, start: date, end: date) -> dict[date, int]:
         counts = {day: 0 for day in iter_dates(start, end)}
-        rows = self._request({
-            "$select": "date_trunc_ymd(pag_data) AS day, count(*) AS count",
-            "$where": f"pag_data between '{start.isoformat()}T00:00:00.000' and '{end.isoformat()}T23:59:59.999'",
-            "$group": "date_trunc_ymd(pag_data)",
-            "$order": "day ASC",
-        })
-        for row in rows:
-            counts[date.fromisoformat(row["day"][:10])] = int(row["count"])
+        offset = 0
+        while True:
+            rows = self._request({
+                "$select": "date_trunc_ymd(pag_data) AS day, count(*) AS count",
+                "$where": f"pag_data between '{start.isoformat()}T00:00:00.000' and '{end.isoformat()}T23:59:59.999'",
+                "$group": "date_trunc_ymd(pag_data)",
+                "$order": "day ASC",
+                "$limit": str(self.page_size),
+                "$offset": str(offset),
+            })
+            for row in rows:
+                counts[date.fromisoformat(row["day"][:10])] = int(row["count"])
+            if len(rows) < self.page_size:
+                break
+            offset += self.page_size
         return counts
 
     def count_day(self, day: date) -> int:
@@ -382,7 +392,12 @@ def export_range(config: ExportConfig, client: SocrataClient) -> ExportSummary:
     root = config.output / f"portale-pagamenti-{config.start}-to-{config.end}"
     daily_dir = root / "daily"
     daily_dir.mkdir(parents=True, exist_ok=True)
-    manifest_entries = _load_manifest(root / "manifest.csv")
+    manifest_path = root / "manifest.csv"
+    metadata_path = root / "metadata.json"
+    zip_path = config.output / f"{root.name}.zip"
+    manifest_entries = _load_manifest(manifest_path)
+    metadata_path.unlink(missing_ok=True)
+    zip_path.unlink(missing_ok=True)
     expected_counts = client.expected_counts(config.start, config.end)
     results: list[DayResult] = []
 
@@ -429,12 +444,11 @@ def export_range(config: ExportConfig, client: SocrataClient) -> ExportSummary:
                 progress = "retried"
         print(f"{day.isoformat()}: {progress}")
         results.append(result)
+        if day != config.today:
+            _write_manifest(manifest_path, results)
 
-    manifest_path = root / "manifest.csv"
-    metadata_path = root / "metadata.json"
     _write_manifest(manifest_path, results)
     _write_metadata(metadata_path, config, results)
-    zip_path = config.output / f"{root.name}.zip"
     _write_zip(root, zip_path, results)
     return ExportSummary(root, zip_path, tuple(results), sum(result.transactions for result in results))
 

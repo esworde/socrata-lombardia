@@ -5,7 +5,7 @@ import unittest
 import csv
 import tempfile
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
@@ -91,6 +91,12 @@ class ExporterPureTests(unittest.TestCase):
             export_payments.validate_period(date(2026, 8, 2), date(2026, 8, 1), date(2026, 8, 7))
         with self.assertRaises(export_payments.InputError):
             export_payments.validate_period(date(2026, 8, 8), date(2026, 8, 8), date(2026, 8, 7))
+
+    def test_parse_iso_date_requires_exact_calendar_date_format(self):
+        for value in ("20260701", "2026-W27-3"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(export_payments.InputError, "use YYYY-MM-DD"):
+                    export_payments.parse_iso_date(value)
 
     def test_normalizes_fixed_schema_and_hour(self):
         raw = {
@@ -225,6 +231,26 @@ class SocrataClientTests(unittest.TestCase):
         self.assertEqual(counts, {date(2026, 7, 1): 2, date(2026, 7, 2): 0})
         self.assertIn("date_trunc_ymd(pag_data)", request.call_args.args[0]["$select"])
 
+    def test_expected_counts_paginates_more_than_one_thousand_grouped_days(self):
+        start = date(2023, 1, 1)
+        end = date(2025, 9, 27)
+        first_page = [
+            {"day": f"{(start + timedelta(days=offset)).isoformat()}T00:00:00.000", "count": "1"}
+            for offset in range(1000)
+        ]
+        client = export_payments.SocrataClient(page_size=1000)
+        with patch.object(
+            client,
+            "_request",
+            side_effect=[first_page, [{"day": "2025-09-27T00:00:00.000", "count": "7"}]],
+        ) as request:
+            counts = client.expected_counts(start, end)
+
+        self.assertEqual(counts[end], 7)
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_args_list[0].args[0]["$offset"], "0")
+        self.assertEqual(request.call_args_list[1].args[0]["$offset"], "1000")
+
     def test_fetch_day_uses_id_keyset_and_deduplicates(self):
         client = export_payments.SocrataClient(page_size=2)
         pages = [
@@ -250,6 +276,14 @@ class SocrataClientTests(unittest.TestCase):
         permanent = HTTPError("https://example", 400, "bad", {}, None)
         with patch.object(export_payments, "urlopen", side_effect=permanent) as urlopen:
             with self.assertRaises(export_payments.ExportError):
+                client._request({"$limit": "1"})
+        self.assertEqual(urlopen.call_count, 1)
+
+    def test_request_does_not_retry_http_codes_above_599(self):
+        client = export_payments.SocrataClient(attempts=3, backoff=0)
+        permanent = HTTPError("https://example", 600, "invalid", {}, None)
+        with patch.object(export_payments, "urlopen", side_effect=permanent) as urlopen:
+            with self.assertRaisesRegex(export_payments.ExportError, "HTTP 600"):
                 client._request({"$limit": "1"})
         self.assertEqual(urlopen.call_count, 1)
 
@@ -341,6 +375,44 @@ class RangeExportTests(unittest.TestCase):
             export_payments.export_range(config, client)
             export_payments.export_range(config, client)
         self.assertEqual(client.fetch_day.call_count, 1)
+
+    def test_failed_range_checkpoints_each_reconciled_day_for_resume(self):
+        first_day = date(2026, 7, 1)
+        second_day = date(2026, 7, 2)
+        first_client = Mock()
+        first_client.expected_counts.return_value = {first_day: 1, second_day: 1}
+        first_client.fetch_day.side_effect = [
+            [{"id": "1", "ora": "8"}],
+            export_payments.ExportError("interrupted"),
+        ]
+        first_client.count_day.return_value = 1
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = export_payments.ExportConfig(
+                first_day, second_day, Path(tmp), None, date(2026, 8, 7)
+            )
+            root = Path(tmp) / "portale-pagamenti-2026-07-01-to-2026-07-02"
+            zip_path = Path(tmp) / f"{root.name}.zip"
+            root.mkdir()
+            (root / "metadata.json").write_text("stale")
+            zip_path.write_text("stale")
+            with self.assertRaisesRegex(export_payments.ExportError, "interrupted"):
+                export_payments.export_range(config, first_client)
+
+            with (root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+                checkpoint = list(csv.DictReader(handle))
+            self.assertEqual([row["date"] for row in checkpoint], ["2026-07-01"])
+            self.assertFalse((root / "metadata.json").exists())
+            self.assertFalse(zip_path.exists())
+
+            second_client = Mock()
+            second_client.expected_counts.return_value = {first_day: 1, second_day: 1}
+            second_client.fetch_day.return_value = [{"id": "2", "ora": "9"}]
+            second_client.count_day.return_value = 1
+            summary = export_payments.export_range(config, second_client)
+
+            second_client.fetch_day.assert_called_once_with(second_day)
+            self.assertTrue(summary.zip_path.exists())
 
     def test_final_historical_reconciliation_failure_creates_no_zip(self):
         client = Mock()

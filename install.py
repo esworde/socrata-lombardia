@@ -13,6 +13,19 @@ AGENT_DIRS = {
 }
 
 
+def _path_exists(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _remove_path(path: Path) -> None:
+    if not _path_exists(path):
+        return
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    else:
+        shutil.rmtree(path)
+
+
 def install_skill(agent: str, home: Path, source: Path = DEFAULT_SOURCE) -> tuple[Path, ...]:
     if not (source / "SKILL.md").is_file():
         raise FileNotFoundError(f"missing {source / 'SKILL.md'}")
@@ -24,20 +37,28 @@ def install_skill(agent: str, home: Path, source: Path = DEFAULT_SOURCE) -> tupl
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.parent / f".{SKILL_NAME}.tmp-{uuid.uuid4()}"
         backup = target.parent / f".{SKILL_NAME}.backup-{uuid.uuid4()}"
-        shutil.copytree(source, temporary)
-        had_target = target.exists()
+        had_target = _path_exists(target)
+        moved_target = False
         try:
+            shutil.copytree(source, temporary)
             if had_target:
                 target.rename(backup)
+                moved_target = True
             temporary.rename(target)
+            if moved_target:
+                _remove_path(backup)
+                moved_target = False
         except Exception:
-            if temporary.exists():
-                shutil.rmtree(temporary)
-            if had_target and backup.exists():
-                backup.rename(target)
+            try:
+                _remove_path(temporary)
+            finally:
+                if moved_target and _path_exists(backup):
+                    if _path_exists(target):
+                        _remove_path(target)
+                    backup.rename(target)
+                elif not had_target:
+                    _remove_path(target)
             raise
-        if backup.exists():
-            shutil.rmtree(backup)
         installed.append(target)
     return tuple(installed)
 
