@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 CANONICAL_DATASET_ID = "78vt-im2v"
 SUPPORTED_DATASET_IDS = {"78vt-im2v", "dr3m-v3by", "ne5i-i4a8"}
-EXPORTER_VERSION = "1.0.0"
+EXPORTER_VERSION = "1.0.1"
 OUTPUT_FIELDS = (
     "id", "psp_id", "psp_desc", "ente_cf", "ente_desc",
     "ente_cap", "ente_prov", "pag_importo", "pag_data", "tipo_dovuto",
@@ -158,8 +158,8 @@ def write_verified_day(
 ) -> DayResult:
     normalized = [normalize_record(record, day) for record in records]
     ids = [record["id"] for record in normalized]
-    if not all(ids) or len(set(ids)) != len(ids):
-        raise VerificationError(f"Day {day.isoformat()} contains missing or duplicate transaction IDs")
+    if not all(ids):
+        raise VerificationError(f"Day {day.isoformat()} contains missing transaction IDs")
     if day != today and len(normalized) != expected_count:
         raise VerificationError(
             f"Day {day.isoformat()} returned {len(normalized)} records; expected {expected_count}"
@@ -219,7 +219,7 @@ class SocrataClient:
             headers["X-App-Token"] = self.token
         request = Request(f"{self.endpoint}?{query}", headers=headers)
         context = create_ssl_context()
-        last_error: HTTPError | URLError | None = None
+        last_error: HTTPError | URLError | TimeoutError | None = None
         for attempt in range(1, self.attempts + 1):
             try:
                 with urlopen(request, timeout=60, context=context) as response:
@@ -229,7 +229,7 @@ class SocrataClient:
                 if error.code != 429 and not 500 <= error.code <= 599:
                     raise ExportError(f"Socrata rejected the request with HTTP {error.code}") from error
                 last_error = error
-            except URLError as error:
+            except (URLError, TimeoutError) as error:
                 last_error = error
             if attempt < self.attempts:
                 time.sleep(self.backoff * (2 ** (attempt - 1)))
@@ -241,7 +241,7 @@ class SocrataClient:
         while True:
             rows = self._request({
                 "$select": "date_trunc_ymd(pag_data) AS day, count(*) AS count",
-                "$where": f"pag_data between '{start.isoformat()}T00:00:00.000' and '{end.isoformat()}T23:59:59.999'",
+                "$where": f"pag_data >= '{start.isoformat()}T00:00:00.000' AND pag_data < '{(end + timedelta(days=1)).isoformat()}T00:00:00.000'",
                 "$group": "date_trunc_ymd(pag_data)",
                 "$order": "day ASC",
                 "$limit": str(self.page_size),
@@ -257,38 +257,47 @@ class SocrataClient:
     def count_day(self, day: date) -> int:
         rows = self._request({
             "$select": "count(*) AS count",
-            "$where": f"date_trunc_ymd(pag_data) = '{day.isoformat()}T00:00:00.000'",
+            "$where": f"pag_data >= '{day.isoformat()}T00:00:00.000' AND pag_data < '{(day + timedelta(days=1)).isoformat()}T00:00:00.000'",
         })
         return int(rows[0]["count"])
 
     def fetch_day(self, day: date) -> list[dict[str, Any]]:
-        records: dict[int, dict[str, Any]] = {}
-        last_id: int | None = None
+        # The published transaction id is not unique. Page on Socrata's row id
+        # as a tie-breaker so every source row survives count reconciliation.
+        records: dict[str, dict[str, Any]] = {}
+        last_key: tuple[int, str] | None = None
         while True:
-            where = f"date_trunc_ymd(pag_data) = '{day.isoformat()}T00:00:00.000'"
-            if last_id is not None:
-                where += f" AND id > {last_id}"
+            where = f"pag_data >= '{day.isoformat()}T00:00:00.000' AND pag_data < '{(day + timedelta(days=1)).isoformat()}T00:00:00.000'"
+            if last_key is not None:
+                last_id, row_id = last_key
+                escaped = row_id.replace("'", "''")
+                where += f" AND (id > {last_id} OR (id = {last_id} AND :id > '{escaped}'))"
             rows = self._request({
-                "$select": ", ".join((*OUTPUT_FIELDS, "ora")),
+                "$select": ", ".join((*OUTPUT_FIELDS, "ora", ":id AS source_row_id")),
                 "$where": where,
-                "$order": "id ASC",
+                "$order": "id ASC, :id ASC",
                 "$limit": str(self.page_size),
             })
             if not rows:
                 break
             try:
-                ids = [int(row["id"]) for row in rows]
+                keys = [(int(row["id"]), str(row["source_row_id"])) for row in rows]
             except (KeyError, TypeError, ValueError) as error:
-                raise VerificationError("Socrata returned a non-numeric transaction id") from error
-            next_id = max(ids)
-            if last_id is not None and next_id <= last_id:
+                raise VerificationError("Socrata returned an invalid transaction or source row id") from error
+            # Keep the server's ordering: system row identifiers have their own
+            # SoQL ordering and must not be compared as Python strings.
+            next_key = keys[-1]
+            if last_key is not None and next_key == last_key:
                 raise VerificationError("Socrata pagination did not advance")
-            for row, row_id in zip(rows, ids):
-                records[row_id] = row
-            last_id = next_id
+            before = len(records)
+            for row, (_, row_id) in zip(rows, keys):
+                records[row_id] = {key: value for key, value in row.items() if key != "source_row_id"}
+            if len(records) == before:
+                raise VerificationError("Socrata pagination did not advance")
+            last_key = next_key
             if len(rows) < self.page_size:
                 break
-        return [records[row_id] for row_id in sorted(records)]
+        return list(records.values())
 
 
 def _load_manifest(path: Path) -> dict[date, dict[str, str]]:

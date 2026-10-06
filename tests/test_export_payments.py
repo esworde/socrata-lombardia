@@ -251,18 +251,20 @@ class SocrataClientTests(unittest.TestCase):
         self.assertEqual(request.call_args_list[0].args[0]["$offset"], "0")
         self.assertEqual(request.call_args_list[1].args[0]["$offset"], "1000")
 
-    def test_fetch_day_uses_id_keyset_and_deduplicates(self):
+    def test_fetch_day_pages_by_source_row_and_preserves_repeated_transaction_ids(self):
         client = export_payments.SocrataClient(page_size=2)
         pages = [
-            [{"id": "1"}, {"id": "2"}],
-            [{"id": "2"}, {"id": "3"}],
+            [{"id": "1", "source_row_id": "row-a"}, {"id": "2", "source_row_id": "row-b"}],
+            [{"id": "2", "source_row_id": "row-c"}, {"id": "3", "source_row_id": "row-d"}],
             [],
         ]
         with patch.object(client, "_request", side_effect=pages) as request:
             rows = client.fetch_day(date(2026, 7, 1))
-        self.assertEqual([row["id"] for row in rows], ["1", "2", "3"])
+        self.assertEqual([row["id"] for row in rows], ["1", "2", "2", "3"])
+        self.assertTrue(all("source_row_id" not in row for row in rows))
         second_where = request.call_args_list[1].args[0]["$where"]
         self.assertIn("id > 2", second_where)
+        self.assertIn("id = 2 AND :id > 'row-b'", second_where)
 
     def test_request_retries_transient_errors_only(self):
         client = export_payments.SocrataClient(attempts=3, backoff=0)
@@ -270,6 +272,34 @@ class SocrataClientTests(unittest.TestCase):
         with patch.object(export_payments, "urlopen", side_effect=[transient, FakeResponse([])]) as urlopen:
             self.assertEqual(client._request({"$limit": "1"}), [])
         self.assertEqual(urlopen.call_count, 2)
+
+    def test_day_queries_use_raw_date_range_with_exclusive_next_day(self):
+        client = export_payments.SocrataClient()
+        with patch.object(client, "_request", return_value=[{"count": "0"}]) as request:
+            self.assertEqual(client.count_day(date(2024, 12, 31)), 0)
+        where = request.call_args.args[0]["$where"]
+        self.assertIn("pag_data >= '2024-12-31T00:00:00.000'", where)
+        self.assertIn("pag_data < '2025-01-01T00:00:00.000'", where)
+        self.assertNotIn("date_trunc", where)
+        with patch.object(client, "_request", return_value=[]) as request:
+            self.assertEqual(client.fetch_day(date(2024, 12, 31)), [])
+        self.assertEqual(request.call_args.args[0]["$where"], where)
+
+    def test_verified_csv_preserves_repeated_published_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = export_payments.write_verified_day(
+                Path(directory), date(2026, 9, 10),
+                [{"id": "7"}, {"id": "7"}], 2, date(2026, 10, 6),
+            )
+            self.assertEqual(result.transactions, 2)
+            self.assertEqual(result.status, "complete")
+            self.assertEqual(export_payments.csv_row_count(Path(directory) / result.filename), 2)
+
+    def test_request_retries_read_timeout(self):
+        client = export_payments.SocrataClient(attempts=2, backoff=0)
+        with patch.object(export_payments, "urlopen", side_effect=[TimeoutError("read timeout"), FakeResponse([])]) as request:
+            self.assertEqual(client._request({"$limit": "1"}), [])
+        self.assertEqual(request.call_count, 2)
 
     def test_request_does_not_retry_http_400(self):
         client = export_payments.SocrataClient(attempts=3, backoff=0)
